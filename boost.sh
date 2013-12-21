@@ -18,9 +18,9 @@
 # same directory as this script, and run "./boost.sh". Grab a cuppa. And voila.
 #===============================================================================
 
-: ${BOOST_LIBS:="thread signals filesystem regex system date_time"}
-: ${IPHONE_SDKVERSION:=6.0}
-: ${OSX_SDKVERSION:=10.8}
+: ${BOOST_LIBS:="filesystem date_time system"}
+: ${IPHONE_SDKVERSION:=7.0}
+: ${OSX_SDKVERSION:=10.9}
 : ${XCODE_ROOT:=`xcode-select -print-path`}
 : ${EXTRA_CPPFLAGS:="-DBOOST_AC_USE_PTHREADS -DBOOST_SP_USE_PTHREADS -std=c++11 -stdlib=libc++"}
 
@@ -41,17 +41,6 @@
 : ${COMPILER:="clang++"}
 
 BOOST_SRC=$SRCDIR/boost
-
-#===============================================================================
-
-ARM_DEV_DIR=$XCODE_ROOT/Platforms/iPhoneOS.platform/Developer/usr/bin/
-SIM_DEV_DIR=$XCODE_ROOT/Platforms/iPhoneSimulator.platform/Developer/usr/bin/
-
-ARM_COMBINED_LIB=$IOSBUILDDIR/lib_boost_arm.a
-SIM_COMBINED_LIB=$IOSBUILDDIR/lib_boost_x86.a
-
-#===============================================================================
-
 
 #===============================================================================
 # Functions
@@ -93,29 +82,13 @@ updateBoost()
 
 	if [ -d $BOOST_SRC ]
 	then
-		# Remove everything not under version control...
-		svn st --no-ignore $BOOST_SRC | egrep '^[?I]' | sed 's:.......::' | xargs rm -rf 
-		svn update boost
+		git checkout $BOOST_SRC/tools/build/v2/user-config.jam
 	else
-		BOOST_BRANCH=`svn ls http://svn.boost.org/svn/boost/tags/release/ | sort | tail -1`
-		svn co http://svn.boost.org/svn/boost/tags/release/$BOOST_BRANCH boost
-	fi
-
-	svn st $BOOST_SRC/tools/build/v2/user-config.jam | grep '^M'
-	if [ $? != 0 ]
-	then
-    	cat >> $BOOST_SRC/tools/build/v2/user-config.jam <<EOF
-using darwin : ${IPHONE_SDKVERSION}~iphone
-   : $XCODE_ROOT/Toolchains/XcodeDefault.xctoolchain/usr/bin/$COMPILER -arch armv6 -arch armv7 -arch armv7s -fvisibility=hidden -fvisibility-inlines-hidden $EXTRA_CPPFLAGS
-   : <striper> <root>$XCODE_ROOT/Platforms/iPhoneOS.platform/Developer
-   : <architecture>arm <target-os>iphone
-   ;
-using darwin : ${IPHONE_SDKVERSION}~iphonesim
-   : $XCODE_ROOT/Toolchains/XcodeDefault.xctoolchain/usr/bin/$COMPILER -arch i386 -fvisibility=hidden -fvisibility-inlines-hidden $EXTRA_CPPFLAGS
-   : <striper> <root>$XCODE_ROOT/Platforms/iPhoneSimulator.platform/Developer
-   : <architecture>x86 <target-os>iphone
-   ;
-EOF
+		git clone --recursive https://github.com/boostorg/boost.git $BOOST_SRC
+		pushd $BOOST_SRC
+		./bootstrap.sh
+		./b2 headers
+		popd
 	fi
 
     doneSection
@@ -149,14 +122,32 @@ buildBoostForiPhoneOS()
 {
     cd $BOOST_SRC
     
+    cat > $BOOST_SRC/tools/build/src/user-config.jam <<EOF
+using darwin : ${IPHONE_SDKVERSION}~iphone
+   : $XCODE_ROOT/Toolchains/XcodeDefault.xctoolchain/usr/bin/$COMPILER -arch armv7 -arch armv7s -arch arm64 -fvisibility-inlines-hidden $EXTRA_CPPFLAGS
+   : <striper> <root>$XCODE_ROOT/Platforms/iPhoneOS.platform/Developer
+   : <architecture>arm <target-os>iphone
+   ;
+EOF
+
 	# Install this one so we can copy the includes for the frameworks...
     ./bjam -j16 --build-dir=../iphone-build --stagedir=../iphone-build/stage --prefix=$PREFIXDIR toolset=darwin architecture=arm target-os=iphone macosx-version=iphone-${IPHONE_SDKVERSION} define=_LITTLE_ENDIAN link=static stage
     ./bjam -j16 --build-dir=../iphone-build --stagedir=../iphone-build/stage --prefix=$PREFIXDIR toolset=darwin architecture=arm target-os=iphone macosx-version=iphone-${IPHONE_SDKVERSION} define=_LITTLE_ENDIAN link=static install
     doneSection
+	
+    cat > $BOOST_SRC/tools/build/src/user-config.jam <<EOF
+using darwin : ${IPHONE_SDKVERSION}~iphonesim
+   : $XCODE_ROOT/Toolchains/XcodeDefault.xctoolchain/usr/bin/$COMPILER -arch i386 -fvisibility-inlines-hidden $EXTRA_CPPFLAGS
+   : <striper> <root>$XCODE_ROOT/Platforms/iPhoneSimulator.platform/Developer
+   : <architecture>x86 <target-os>iphone
+   ;
+EOF
 
+	echo "Building for simulator..."
     ./bjam -j16 --build-dir=../iphonesim-build --stagedir=../iphonesim-build/stage --toolset=darwin architecture=x86 target-os=iphone macosx-version=iphonesim-${IPHONE_SDKVERSION} link=static stage
 	doneSection
 
+	echo "Building for osx..."
 	./b2 -j16 --build-dir=../osx-build --stagedir=../osx-build/stage toolset=clang cxxflags="-std=c++11 -stdlib=libc++ -arch i386 -arch x86_64" linkflags="-stdlib=libc++" link=static threading=multi stage
     doneSection
 }
@@ -167,9 +158,9 @@ scrunchAllLibsTogetherInOneLibPerPlatform()
 {
 	cd $SRCDIR
 
-    mkdir -p $IOSBUILDDIR/armv6/obj
     mkdir -p $IOSBUILDDIR/armv7/obj
     mkdir -p $IOSBUILDDIR/armv7s/obj
+    mkdir -p $IOSBUILDDIR/arm64/obj
     mkdir -p $IOSBUILDDIR/i386/obj
 
     mkdir -p $OSXBUILDDIR/i386/obj
@@ -181,22 +172,22 @@ scrunchAllLibsTogetherInOneLibPerPlatform()
     for NAME in $BOOST_LIBS; do
         ALL_LIBS="$ALL_LIBS libboost_$NAME.a"
 
-        $ARM_DEV_DIR/lipo "iphone-build/stage/lib/libboost_$NAME.a" -thin armv6 -o $IOSBUILDDIR/armv6/libboost_$NAME.a
-        $ARM_DEV_DIR/lipo "iphone-build/stage/lib/libboost_$NAME.a" -thin armv7 -o $IOSBUILDDIR/armv7/libboost_$NAME.a
-        $ARM_DEV_DIR/lipo "iphone-build/stage/lib/libboost_$NAME.a" -thin armv7s -o $IOSBUILDDIR/armv7s/libboost_$NAME.a
+        xcrun lipo "iphone-build/stage/lib/libboost_$NAME.a" -thin armv7 -o $IOSBUILDDIR/armv7/libboost_$NAME.a
+        xcrun lipo "iphone-build/stage/lib/libboost_$NAME.a" -thin armv7s -o $IOSBUILDDIR/armv7s/libboost_$NAME.a
+        xcrun lipo "iphone-build/stage/lib/libboost_$NAME.a" -thin arm64 -o $IOSBUILDDIR/arm64/libboost_$NAME.a
 
         cp "iphonesim-build/stage/lib/libboost_$NAME.a" $IOSBUILDDIR/i386/
 
-        $ARM_DEV_DIR/lipo "osx-build/stage/lib/libboost_$NAME.a" -thin i386 -o $OSXBUILDDIR/i386/libboost_$NAME.a
-        $ARM_DEV_DIR/lipo "osx-build/stage/lib/libboost_$NAME.a" -thin x86_64 -o $OSXBUILDDIR/x86_64/libboost_$NAME.a
+        xcrun lipo "osx-build/stage/lib/libboost_$NAME.a" -thin i386 -o $OSXBUILDDIR/i386/libboost_$NAME.a
+        xcrun lipo "osx-build/stage/lib/libboost_$NAME.a" -thin x86_64 -o $OSXBUILDDIR/x86_64/libboost_$NAME.a
     done
 
     echo "Decomposing each architecture's .a files"
     for NAME in $ALL_LIBS; do
         echo Decomposing $NAME...
-        (cd $IOSBUILDDIR/armv6/obj; ar -x ../$NAME );
         (cd $IOSBUILDDIR/armv7/obj; ar -x ../$NAME );
         (cd $IOSBUILDDIR/armv7s/obj; ar -x ../$NAME );
+        (cd $IOSBUILDDIR/arm64/obj; ar -x ../$NAME );
         (cd $IOSBUILDDIR/i386/obj; ar -x ../$NAME );
 
         (cd $OSXBUILDDIR/i386/obj; ar -x ../$NAME );
@@ -205,21 +196,21 @@ scrunchAllLibsTogetherInOneLibPerPlatform()
 
     echo "Linking each architecture into an uberlib ($ALL_LIBS => libboost.a )"
     rm $IOSBUILDDIR/*/libboost.a
-    echo ...armv6
-    (cd $IOSBUILDDIR/armv6; $ARM_DEV_DIR/ar crus libboost.a obj/*.o; )
     echo ...armv7
-    (cd $IOSBUILDDIR/armv7; $ARM_DEV_DIR/ar crus libboost.a obj/*.o; )
+    (cd $IOSBUILDDIR/armv7; xcrun ar crus libboost.a obj/*.o; )
     echo ...armv7s
-    (cd $IOSBUILDDIR/armv7s; $ARM_DEV_DIR/ar crus libboost.a obj/*.o; )
+    (cd $IOSBUILDDIR/armv7s; xcrun ar crus libboost.a obj/*.o; )
+    echo ...arm64
+    (cd $IOSBUILDDIR/arm64; xcrun ar crus libboost.a obj/*.o; )
     echo ...i386
-    (cd $IOSBUILDDIR/i386;  $SIM_DEV_DIR/ar crus libboost.a obj/*.o; )
+    (cd $IOSBUILDDIR/i386;  xcrun ar crus libboost.a obj/*.o; )
 
     rm $OSXBUILDDIR/*/libboost.a
     echo ...osx-i386
-    (cd $OSXBUILDDIR/i386;  $SIM_DEV_DIR/ar crus libboost.a obj/*.o; )
+    (cd $OSXBUILDDIR/i386;  xcrun ar crus libboost.a obj/*.o; )
 
     echo ...x86_64
-    (cd $OSXBUILDDIR/x86_64;  $SIM_DEV_DIR/ar crus libboost.a obj/*.o; )
+    (cd $OSXBUILDDIR/x86_64;  xcrun ar crus libboost.a obj/*.o; )
 }
 
 #===============================================================================
@@ -259,7 +250,7 @@ buildFramework()
     FRAMEWORK_INSTALL_NAME=$FRAMEWORK_BUNDLE/Versions/$FRAMEWORK_VERSION/$FRAMEWORK_NAME
 
     echo "Lipoing library into $FRAMEWORK_INSTALL_NAME..."
-    $ARM_DEV_DIR/lipo -create $BUILDDIR/*/libboost.a -o "$FRAMEWORK_INSTALL_NAME" || abort "Lipo $1 failed"
+    xcrun lipo -create $BUILDDIR/*/libboost.a -o "$FRAMEWORK_INSTALL_NAME" || abort "Lipo $1 failed"
 
     echo "Framework: Copying includes..."
     cp -r $PREFIXDIR/include/boost/*  $FRAMEWORK_BUNDLE/Headers/
@@ -299,7 +290,7 @@ mkdir -p $IOSBUILDDIR
 cleanEverythingReadyToStart
 updateBoost
 
-BOOST_VERSION=`svn info $BOOST_SRC | grep URL | sed -e 's/^.*\/Boost_\([^\/]*\)/\1/'`
+BOOST_VERSION=1.55.0
 echo "BOOST_VERSION:     $BOOST_VERSION"
 echo "BOOST_LIBS:        $BOOST_LIBS"
 echo "BOOST_SRC:         $BOOST_SRC"
